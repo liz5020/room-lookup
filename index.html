@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>房號查詢系統</title>
+<style>
+  :root{
+    --bg:#f6f5f2; --card:#ffffff; --text:#1f2422; --muted:#6b7570; --border:#e2e0da;
+    --accent:#2f6f5e; --accent-text:#ffffff; --input-bg:#ffffff;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#161a18; --card:#1f2422; --text:#eceae5; --muted:#9aa39d; --border:#2c332f; --accent:#4fae91; --accent-text:#0b1512; --input-bg:#242a27; }
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Noto Sans TC",sans-serif; line-height:1.5;}
+  .wrap{max-width:560px; margin:0 auto; padding:24px 16px 60px;}
+  h1{font-size:1.3rem; margin:0 0 4px;}
+  .sub{color:var(--muted); font-size:.9rem; margin-bottom:18px;}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:20px; margin-bottom:16px;}
+  label{display:block; font-size:.85rem; color:var(--muted); margin-bottom:4px;}
+  input[type="text"], input[type="tel"]{width:100%; padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:var(--input-bg); color:var(--text); font-size:1rem;}
+  button.btn{background:var(--accent); color:var(--accent-text); border:none; border-radius:10px; padding:10px 18px; font-size:.95rem; font-weight:600; cursor:pointer; width:100%;}
+  .result{padding:18px; border-radius:14px; background:var(--card); border:1px solid var(--border);}
+  .result .field{display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px dashed var(--border);}
+  .result .field:last-child{border-bottom:none;}
+  .result .field .k{color:var(--muted); font-size:.85rem; white-space:nowrap;}
+  .result .field .v{font-weight:700; font-size:1.05rem; text-align:right;}
+  .pending{color:var(--muted); font-style:italic; font-weight:500 !important;}
+  .hint{font-size:.8rem; color:var(--muted); margin-top:6px;}
+  .empty{color:var(--muted); text-align:center; padding:30px 0;}
+  .status{font-size:.8rem; color:var(--muted); margin-top:8px; text-align:center;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>房號查詢系統</h1>
+  <div class="sub">請掃描名牌上的 QR Code，或於下方輸入姓名＋手機查詢您的房號／桌號等資訊。</div>
+  <div id="app"><div class="hint">資料讀取中…</div></div>
+</div>
+
+<script src="config.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  function esc(s){
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+  function digits(s){ return String(s||'').replace(/\D/g,''); }
+  function fmtMoney(v){
+    if (v === '' || v == null) return '';
+    var n = Number(String(v).replace(/[^\d.-]/g,''));
+    if (isNaN(n)) return esc(v);
+    return 'NT$ ' + n.toLocaleString('en-US');
+  }
+
+  // Minimal RFC4180-ish CSV parser (handles quoted fields with commas/newlines)
+  function parseCSV(text){
+    var rows = [], row = [], field = '', inQuotes = false;
+    for (var i = 0; i < text.length; i++){
+      var c = text[i], next = text[i+1];
+      if (inQuotes){
+        if (c === '"' && next === '"'){ field += '"'; i++; }
+        else if (c === '"'){ inQuotes = false; }
+        else { field += c; }
+      } else {
+        if (c === '"'){ inQuotes = true; }
+        else if (c === ','){ row.push(field); field=''; }
+        else if (c === '\n'){ row.push(field); rows.push(row); row=[]; field=''; }
+        else if (c === '\r'){ /* skip */ }
+        else { field += c; }
+      }
+    }
+    if (field.length || row.length){ row.push(field); rows.push(row); }
+    return rows.filter(function(r){ return r.length > 1 || (r[0]||'').trim() !== ''; });
+  }
+
+  function rowsToObjects(rows){
+    if (!rows.length) return [];
+    var headers = rows[0].map(function(h){ return h.trim(); });
+    return rows.slice(1).map(function(r){
+      var o = {};
+      headers.forEach(function(h, i){ o[h] = (r[i] || '').trim(); });
+      return o;
+    });
+  }
+
+  function roommatesOf(all, a){
+    if (!a || !a.room || !a.room.trim()) return [];
+    return all.filter(function(x){ return x.id!==a.id && x.room && x.room.trim()===a.room.trim(); })
+              .map(function(x){ return x.name; });
+  }
+
+  function renderResultBlock(all, a, viaQr){
+    if (!a){
+      return '<div class="result"><div class="empty">' +
+        (viaQr ? '找不到對應的資料，請洽現場工作人員協助查詢。' : '') +
+      '</div></div>';
+    }
+    var room = a.room && a.room.trim() ? esc(a.room) : '<span class="pending">尚未公布</span>';
+    var table = a.table && a.table.trim() ? esc(a.table) : '<span class="pending">尚未公布</span>';
+    var copay = a.copay && a.copay.trim() ? esc(fmtMoney(a.copay)) : '<span class="pending">尚未確定</span>';
+    var mates = roommatesOf(all, a);
+    var matesHtml = mates.length ? esc(mates.join('、')) : (a.room && a.room.trim() ? '<span class="pending">目前僅您一人</span>' : '<span class="pending">尚未公布</span>');
+
+    var html = '<div class="result">';
+    html += '<div class="field"><span class="k">姓名</span><span class="v">' + esc(a.name) + '</span></div>';
+    if (a.unit || a.title){
+      html += '<div class="field"><span class="k">單位／職稱</span><span class="v">' + esc(a.unit) + (a.title ? '／'+esc(a.title) : '') + '</span></div>';
+    }
+    html += '<div class="field"><span class="k">房號</span><span class="v">' + room + '</span></div>';
+    html += '<div class="field"><span class="k">室友</span><span class="v">' + matesHtml + '</span></div>';
+    html += '<div class="field"><span class="k">桌號</span><span class="v">' + table + '</span></div>';
+    html += '<div class="field"><span class="k">自付金額</span><span class="v">' + copay + '</span></div>';
+    if (a.taxId && a.taxId.trim()){
+      html += '<div class="field"><span class="k">統一編號</span><span class="v">' + esc(a.taxId) + '</span></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function init(all){
+    var app = document.getElementById('app');
+    var params = new URLSearchParams(location.search);
+    var qid = params.get('id');
+
+    if (qid){
+      var found = all.find(function(a){ return a.id === qid; });
+      app.innerHTML = renderResultBlock(all, found, true);
+      return;
+    }
+
+    app.innerHTML =
+      '<div class="card">' +
+        '<label for="s-name">姓名</label>' +
+        '<input type="text" id="s-name" placeholder="請輸入您的姓名" autocomplete="name">' +
+        '<div style="height:10px"></div>' +
+        '<label for="s-phone">手機號碼（末4碼即可）</label>' +
+        '<input type="tel" id="s-phone" placeholder="例如：1234 或完整手機號碼" autocomplete="tel">' +
+        '<div style="height:14px"></div>' +
+        '<button class="btn" id="s-btn">查詢</button>' +
+        '<div class="hint">為保護大家的房號資訊不被他人查到，需同時輸入姓名與手機末4碼才能查詢。</div>' +
+        '<div id="s-result" style="margin-top:16px"></div>' +
+      '</div>';
+
+    function doSearch(){
+      var name = document.getElementById('s-name').value.trim();
+      var phoneInput = digits(document.getElementById('s-phone').value);
+      var box = document.getElementById('s-result');
+      if (!name || !phoneInput){
+        box.innerHTML = '<div class="hint">請同時輸入姓名與手機號碼（末4碼即可）。</div>';
+        return;
+      }
+      var matches = all.filter(function(a){
+        var nameMatch = (a.name||'').trim() === name;
+        var stored = digits(a.phone);
+        var phoneMatch = stored && stored.length >= phoneInput.length && stored.slice(-phoneInput.length) === phoneInput;
+        return nameMatch && phoneMatch;
+      });
+      if (matches.length === 0){
+        box.innerHTML = '<div class="hint">查無資料，請確認姓名與手機號碼是否正確；若您的手機尚未登記，請洽現場工作人員協助查詢。</div>';
+      } else if (matches.length === 1){
+        box.innerHTML = renderResultBlock(all, matches[0], false);
+      } else {
+        box.innerHTML = '<div class="hint">找到多筆符合資料，請洽現場工作人員協助確認。</div>';
+      }
+    }
+
+    document.getElementById('s-btn').addEventListener('click', doSearch);
+    document.getElementById('s-phone').addEventListener('keydown', function(e){ if(e.key==='Enter') doSearch(); });
+  }
+
+  var url = window.SHEET_CSV_URL;
+  if (!url || url.indexOf('請貼上') !== -1){
+    document.getElementById('app').innerHTML = '<div class="hint">尚未設定資料來源，請在 config.js 填入 Google 試算表發布後的 CSV 連結。</div>';
+  } else {
+    fetch(url).then(function(r){
+      if (!r.ok) throw new Error('fetch failed: ' + r.status);
+      return r.text();
+    }).then(function(text){
+      var all = rowsToObjects(parseCSV(text));
+      init(all);
+    }).catch(function(err){
+      console.error(err);
+      document.getElementById('app').innerHTML = '<div class="hint">資料讀取失敗，請確認 Google 試算表已「發布到網路」並設為任何人可檢視，或稍後再試。</div>';
+    });
+  }
+})();
+</script>
+</body>
+</html>

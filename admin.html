@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>名牌列印與名單預覽（內部用）</title>
+<style>
+  :root{ --bg:#f6f5f2; --card:#ffffff; --text:#1f2422; --muted:#6b7570; --border:#e2e0da; --accent:#2f6f5e; --accent-text:#ffffff; }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#161a18; --card:#1f2422; --text:#eceae5; --muted:#9aa39d; --border:#2c332f; --accent:#4fae91; --accent-text:#0b1512; }
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Noto Sans TC",sans-serif; line-height:1.5;}
+  .wrap{max-width:1000px; margin:0 auto; padding:24px 16px 60px;}
+  h1{font-size:1.3rem; margin:0 0 4px;}
+  .sub{color:var(--muted); font-size:.9rem; margin-bottom:18px;}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:20px; margin-bottom:16px;}
+  button.btn{background:var(--accent); color:var(--accent-text); border:none; border-radius:10px; padding:10px 18px; font-size:.95rem; font-weight:600; cursor:pointer;}
+  table{width:100%; border-collapse:collapse; font-size:.82rem;}
+  th, td{border-bottom:1px solid var(--border); padding:6px 4px; text-align:left;}
+  th{color:var(--muted); font-size:.74rem;}
+  .table-scroll{overflow-x:auto;}
+  .badges-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:14px;}
+  .badge{border:1px solid var(--border); border-radius:12px; padding:14px; text-align:center; background:var(--card);}
+  .badge .name{font-size:1.1rem; font-weight:700;}
+  .badge .unit{font-size:.85rem; color:var(--muted); margin-top:2px;}
+  .badge .title{font-size:.85rem; color:var(--muted);}
+  .badge .qr{margin:10px auto 4px; width:120px; height:120px;}
+  .badge .qr svg{width:100%; height:100%;}
+  .hint{font-size:.8rem; color:var(--muted); margin-top:6px;}
+  .subtabs{display:flex; gap:6px; margin-bottom:14px;}
+  .subtabs button{background:var(--card); border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:999px; font-size:.82rem; cursor:pointer;}
+  .subtabs button.active{background:var(--accent); color:var(--accent-text); border-color:var(--accent);}
+  @media print{
+    .no-print, .subtabs{display:none !important;}
+    .badges-grid{grid-template-columns:repeat(3,1fr);}
+    .badge{break-inside:avoid; border:1px dashed #999;}
+    .wrap{max-width:100%; padding:0;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>名牌列印與名單預覽</h1>
+  <div class="sub no-print">⚠️ 此頁只給工作人員自己使用（含完整名單），請勿把這個網址放到名牌或公開場合，資料請直接在 Google 試算表裡編輯。</div>
+  <div class="subtabs no-print">
+    <button data-sub="badges" class="active">名牌與 QR Code</button>
+    <button data-sub="list">名單預覽</button>
+  </div>
+  <div id="app"><div class="hint">資料讀取中…</div></div>
+</div>
+
+<script src="config.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.0.3/qrcode.min.js"></script>
+<script>
+(function(){
+  "use strict";
+  var sub = 'badges';
+  var ALL = [];
+
+  function esc(s){
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+  function parseCSV(text){
+    var rows = [], row = [], field = '', inQuotes = false;
+    for (var i = 0; i < text.length; i++){
+      var c = text[i], next = text[i+1];
+      if (inQuotes){
+        if (c === '"' && next === '"'){ field += '"'; i++; }
+        else if (c === '"'){ inQuotes = false; }
+        else { field += c; }
+      } else {
+        if (c === '"'){ inQuotes = true; }
+        else if (c === ','){ row.push(field); field=''; }
+        else if (c === '\n'){ row.push(field); rows.push(row); row=[]; field=''; }
+        else if (c === '\r'){ /* skip */ }
+        else { field += c; }
+      }
+    }
+    if (field.length || row.length){ row.push(field); rows.push(row); }
+    return rows.filter(function(r){ return r.length > 1 || (r[0]||'').trim() !== ''; });
+  }
+  function rowsToObjects(rows){
+    if (!rows.length) return [];
+    var headers = rows[0].map(function(h){ return h.trim(); });
+    return rows.slice(1).map(function(r){
+      var o = {};
+      headers.forEach(function(h, i){ o[h] = (r[i] || '').trim(); });
+      return o;
+    });
+  }
+
+  function render(){
+    var app = document.getElementById('app');
+    if (sub === 'badges'){
+      app.innerHTML =
+        '<div class="card no-print">' +
+          '<div class="hint">每張名牌的 QR Code 會連到查詢頁並自動帶入該員的專屬連結。名牌僅顯示姓名／單位／職稱；房號桌號待公布後，直接更新 Google 試算表即可，不用重新列印 QR Code（連結不會變）。</div>' +
+          '<div style="height:10px"></div>' +
+          '<button class="btn" id="btn-print">列印全部名牌</button>' +
+        '</div>' +
+        '<div class="badges-grid" id="badges-grid"></div>';
+      var grid = document.getElementById('badges-grid');
+      var base = location.origin + location.pathname.replace(/admin\.html$/, 'index.html');
+      ALL.forEach(function(a){
+        var url = base + '?id=' + encodeURIComponent(a.id);
+        var div = document.createElement('div');
+        div.className = 'badge';
+        div.innerHTML =
+          '<div class="qr"></div>' +
+          '<div class="name">' + esc(a.name || '（未填姓名）') + '</div>' +
+          '<div class="unit">' + esc(a.unit||'') + '</div>' +
+          '<div class="title">' + esc(a.title||'') + '</div>';
+        grid.appendChild(div);
+        try {
+          var qr = qrcode(0, 'M');
+          qr.addData(url);
+          qr.make();
+          div.querySelector('.qr').innerHTML = qr.createSvgTag(4, 4);
+        } catch(e){
+          div.querySelector('.qr').textContent = '(QR產生失敗)';
+        }
+      });
+      document.getElementById('btn-print').addEventListener('click', function(){ window.print(); });
+    } else {
+      var cols = ['id','name','unit','title','phone','room','table','copay','taxId'];
+      var labels = {id:'ID',name:'姓名',unit:'單位',title:'職稱',phone:'手機',room:'房號',table:'桌號',copay:'自付金額',taxId:'統編'};
+      var head = cols.map(function(c){ return '<th>'+labels[c]+'</th>'; }).join('');
+      var rows = ALL.map(function(a){
+        return '<tr>' + cols.map(function(c){ return '<td>'+esc(a[c]||'')+'</td>'; }).join('') + '</tr>';
+      }).join('');
+      app.innerHTML = '<div class="card"><div class="table-scroll"><table><thead><tr>'+head+'</tr></thead><tbody>'+rows+'</tbody></table></div></div>';
+    }
+  }
+
+  document.querySelectorAll('.subtabs button').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      sub = btn.getAttribute('data-sub');
+      document.querySelectorAll('.subtabs button').forEach(function(b){ b.classList.toggle('active', b===btn); });
+      render();
+    });
+  });
+
+  var url = window.SHEET_CSV_URL;
+  if (!url || url.indexOf('請貼上') !== -1){
+    document.getElementById('app').innerHTML = '<div class="hint">尚未設定資料來源，請在 config.js 填入 Google 試算表發布後的 CSV 連結。</div>';
+  } else {
+    fetch(url).then(function(r){ return r.text(); }).then(function(text){
+      ALL = rowsToObjects(parseCSV(text));
+      render();
+    }).catch(function(err){
+      console.error(err);
+      document.getElementById('app').innerHTML = '<div class="hint">資料讀取失敗，請確認 Google 試算表已發布到網路。</div>';
+    });
+  }
+})();
+</script>
+</body>
+</html>
